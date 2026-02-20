@@ -1,2 +1,2 @@
-# .github
+# Heiervang technologies
 Org readme

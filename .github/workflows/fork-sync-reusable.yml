@@ -96,7 +96,7 @@ jobs:
 
   rebase-ht:
     needs: sync-main
-    if: needs.sync-main.outputs.new_commits == "true" && inputs.skip_rebase != true
+    if: needs.sync-main.outputs.new_commits == 'true' && inputs.skip_rebase != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +124,7 @@ jobs:
           fi
 
       - name: Create backup branch
-        if: inputs.create_backup == true && steps.check-conflict.outputs.conflict_exists == "false"
+        if: inputs.create_backup == true && steps.check-conflict.outputs.conflict_exists == 'false'
         env:
           FORK_BRANCH: ${{ inputs.fork_branch }}
           GH_TOKEN: ${{ secrets.gh_pat }}
@@ -146,7 +146,7 @@ jobs:
 
       - name: Rebase ht on main
         id: rebase
-        if: steps.check-conflict.outputs.conflict_exists == "false"
+        if: steps.check-conflict.outputs.conflict_exists == 'false'
         env:
           FORK_BRANCH: ${{ inputs.fork_branch }}
         run: |
@@ -157,7 +157,7 @@ jobs:
 
           REBASE_OUTPUT=$(git rebase origin/main 2>&1) && REBASE_OK=true || REBASE_OK=false
 
-          if [ "$REBASE_OK" = "true" ]; then
+          if [ "$REBASE_OK" = 'true' ]; then
             echo "status=success" >> $GITHUB_OUTPUT
             echo "Rebase successful ($HT_COMMIT_COUNT commits replayed)"
           else
@@ -172,7 +172,7 @@ jobs:
           fi
 
       - name: Force-push rebased ht
-        if: steps.rebase.outputs.status == "success"
+        if: steps.rebase.outputs.status == 'success'
         env:
           FORK_BRANCH: ${{ inputs.fork_branch }}
         run: |
@@ -180,7 +180,7 @@ jobs:
           echo "Successfully force-pushed $FORK_BRANCH"
 
       - name: Create conflict issue
-        if: steps.rebase.outputs.status == "conflict"
+        if: steps.rebase.outputs.status == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.gh_pat }}
           FORK_BRANCH: ${{ inputs.fork_branch }}
@@ -236,7 +236,7 @@ jobs:
           echo "New commits: $NEW_COMMITS"
           echo "Rebase ht: $REBASE_RESULT"
 
-          if [ "$SYNC_RESULT" != "success" ]; then
+          if [ "$SYNC_RESULT" != 'success' ]; then
             echo "::error::Main sync failed — upstream may have diverged"
             exit 1
           fi

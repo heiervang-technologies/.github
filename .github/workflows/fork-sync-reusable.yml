@@ -1,0 +1,246 @@
+name: Reusable Fork Sync
+
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        description: "Full upstream repo (e.g., vllm-project/vllm)"
+        required: true
+        type: string
+      upstream_branch:
+        description: "Upstream branch to sync from (some use master)"
+        required: false
+        default: "main"
+        type: string
+      fork_branch:
+        description: "The HT customization branch"
+        required: false
+        default: "ht"
+        type: string
+      skip_rebase:
+        description: "Only sync main, do not rebase ht"
+        required: false
+        default: false
+        type: boolean
+      create_backup:
+        description: "Create backup branch before force-push"
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      gh_pat:
+        description: "PAT with contents:write, issues:write"
+        required: true
+
+concurrency:
+  group: fork-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync-main:
+    runs-on: ubuntu-latest
+    outputs:
+      new_commits: ${{ steps.sync.outputs.new_commits }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      main_sha_before: ${{ steps.sync.outputs.main_sha_before }}
+      main_sha_after: ${{ steps.sync.outputs.main_sha_after }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.gh_pat }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync main with upstream
+        id: sync
+        env:
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+        run: |
+          MAIN_SHA_BEFORE=$(git rev-parse HEAD)
+          echo "main_sha_before=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
+          git fetch upstream "$UPSTREAM_BRANCH"
+
+          UPSTREAM_SHA=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
+          echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+
+          # Check if main is already up to date
+          if [ "$MAIN_SHA_BEFORE" = "$UPSTREAM_SHA" ]; then
+            echo "main is already up to date with upstream"
+            echo "new_commits=false" >> $GITHUB_OUTPUT
+            echo "main_sha_after=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Fast-forward only — if this fails, main has diverged (bad state)
+          if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
+            echo "::error::main has diverged from upstream — manual intervention required"
+            exit 1
+          fi
+
+          git push origin main
+
+          MAIN_SHA_AFTER=$(git rev-parse HEAD)
+          echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
+          echo "new_commits=true" >> $GITHUB_OUTPUT
+
+          COMMIT_COUNT=$(git rev-list --count "$MAIN_SHA_BEFORE".."$MAIN_SHA_AFTER")
+          echo "Synced $COMMIT_COUNT new commits from upstream"
+
+  rebase-ht:
+    needs: sync-main
+    if: needs.sync-main.outputs.new_commits == "true" && inputs.skip_rebase != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.fork_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.gh_pat }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for existing conflict issue
+        id: check-conflict
+        env:
+          GH_TOKEN: ${{ secrets.gh_pat }}
+        run: |
+          EXISTING=$(gh issue list --label "sync-conflict" --state open --json number --jq ".[0].number // empty")
+          if [ -n "$EXISTING" ]; then
+            echo "conflict_exists=true" >> $GITHUB_OUTPUT
+            echo "::warning::Found open conflict issue #$EXISTING. Skipping rebase to prevent log spam."
+          else
+            echo "conflict_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create backup branch
+        if: inputs.create_backup == true && steps.check-conflict.outputs.conflict_exists == "false"
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+          GH_TOKEN: ${{ secrets.gh_pat }}
+        run: |
+          BACKUP="$FORK_BRANCH-backup/$(date +%Y%m%d-%H%M%S)"
+          git push origin "$FORK_BRANCH:refs/heads/$BACKUP"
+          echo "Created backup branch: $BACKUP"
+
+          # Clean up old backups (keep last 5)
+          git ls-remote --heads origin "$FORK_BRANCH-backup/*" \
+            | awk "{print \$2}" \
+            | sed "s|refs/heads/||" \
+            | sort \
+            | head -n -5 \
+            | while read -r old_backup; do
+                echo "Deleting old backup: $old_backup"
+                git push origin --delete "$old_backup" 2>/dev/null || true
+              done
+
+      - name: Rebase ht on main
+        id: rebase
+        if: steps.check-conflict.outputs.conflict_exists == "false"
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          git fetch origin main
+
+          HT_COMMIT_COUNT=$(git rev-list --count origin/main..HEAD)
+          echo "ht has $HT_COMMIT_COUNT commits on top of main"
+
+          REBASE_OUTPUT=$(git rebase origin/main 2>&1) && REBASE_OK=true || REBASE_OK=false
+
+          if [ "$REBASE_OK" = "true" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "Rebase successful ($HT_COMMIT_COUNT commits replayed)"
+          else
+            git rebase --abort || true
+            echo "status=conflict" >> $GITHUB_OUTPUT
+
+            # Extract conflict info
+            CONFLICTS=$(echo "$REBASE_OUTPUT" | grep -E "^CONFLICT" | head -20 || true)
+            echo "conflicts<<EOF" >> $GITHUB_OUTPUT
+            echo "$CONFLICTS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Force-push rebased ht
+        if: steps.rebase.outputs.status == "success"
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          git push --force-with-lease origin "$FORK_BRANCH"
+          echo "Successfully force-pushed $FORK_BRANCH"
+
+      - name: Create conflict issue
+        if: steps.rebase.outputs.status == "conflict"
+        env:
+          GH_TOKEN: ${{ secrets.gh_pat }}
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
+        run: |
+          BODY="""## Rebase Conflict: \`$FORK_BRANCH\` on \`main\`
+
+          The automated rebase of \`$FORK_BRANCH\` onto the latest \`main\` (synced from \`$UPSTREAM_REPO\`) failed due to conflicts.
+
+          ### Conflicting Files
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+
+          ### Manual Resolution Steps
+          \`\`\`bash
+          git fetch origin
+          git checkout $FORK_BRANCH
+          git rebase origin/main
+          # Resolve conflicts...
+          git rebase --continue
+          git push --force-with-lease origin $FORK_BRANCH
+          \`\`\`
+
+          ### Workflow Run
+          [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ---
+          *Automated by fork-sync workflow*
+          """
+
+          gh label create "sync-conflict" --color "d73a4a" --description "Upstream sync rebase conflict" 2>/dev/null || true
+          gh issue create \
+            --title "Rebase conflict: $FORK_BRANCH on main ($(date +%Y-%m-%d))" \
+            --label "sync-conflict" \
+            --body "$BODY"
+          echo "Created new conflict issue"
+
+  status-check:
+    needs: [sync-main, rebase-ht]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize
+        env:
+          SYNC_RESULT: ${{ needs.sync-main.result }}
+          REBASE_RESULT: ${{ needs.rebase-ht.result }}
+          NEW_COMMITS: ${{ needs.sync-main.outputs.new_commits }}
+        run: |
+          echo "## Fork Sync Summary"
+          echo "Sync main: $SYNC_RESULT"
+          echo "New commits: $NEW_COMMITS"
+          echo "Rebase ht: $REBASE_RESULT"
+
+          if [ "$SYNC_RESULT" != "success" ]; then
+            echo "::error::Main sync failed — upstream may have diverged"
+            exit 1
+          fi
+
+          if [ "$REBASE_RESULT" = "failure" ]; then
+            echo "::warning::Rebase failed — check for conflict issue"
+          fi

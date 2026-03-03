@@ -1,0 +1,114 @@
+name: Reusable History Rewrite
+
+on:
+  workflow_call:
+    inputs:
+      upstream_branch:
+        description: "Upstream branch (e.g. main)"
+        required: false
+        default: "main"
+        type: string
+      fork_branch:
+        description: "Branch to rewrite"
+        required: false
+        default: "ht"
+        type: string
+      dry_run:
+        description: "Analyze only, do not push"
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      gh_pat:
+        description: "PAT with contents:write"
+        required: true
+
+jobs:
+  analyze-and-rewrite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.gh_pat }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create backup branch
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          BACKUP="$FORK_BRANCH-backup-pre-rewrite/$(date +%Y%m%d-%H%M%S)"
+          git branch "$BACKUP" "origin/$FORK_BRANCH"
+          git push origin "$BACKUP"
+          echo "Created backup branch: $BACKUP"
+          echo "backup_branch=$BACKUP" >> $GITHUB_ENV
+
+      - name: Analyze commits
+        env:
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          echo "# Rewrite Analysis Report" > rewrite-report.md
+          echo "Analyzing commits in \`$FORK_BRANCH\` that are not in \`$UPSTREAM_BRANCH\`" >> rewrite-report.md
+          echo "" >> rewrite-report.md
+          
+          git fetch origin $UPSTREAM_BRANCH
+          git checkout $FORK_BRANCH
+          
+          echo "## Commits Analysis" >> rewrite-report.md
+          echo "| Commit | Subject | Recommended Action | Reason |" >> rewrite-report.md
+          echo "|---|---|---|---|" >> rewrite-report.md
+          
+          git log origin/$UPSTREAM_BRANCH..HEAD --reverse --format="%H %s" > commits.txt
+          while read -r commit subject; do
+            ACTION="KEEP"
+            REASON="-"
+            
+            # Check if merge commit
+            PARENTS=$(git log -1 --format="%P" $commit | wc -w)
+            if [ "$PARENTS" -gt 1 ]; then
+              ACTION="DROP"
+              REASON="Merge commit"
+            else
+              # Check fixup/review keywords
+              if echo "$subject" | grep -iE "(fix|fixup|address|review|feedback|oops|typo|wip)"; then
+                ACTION="SQUASH"
+                REASON="Fixup/WIP keyword detected"
+              else
+                # Check upstream overlap
+                FILES=$(git diff-tree --no-commit-id --name-only -r $commit)
+                if [ -n "$FILES" ]; then
+                  DIFF=$(git diff origin/$UPSTREAM_BRANCH..$commit -- $FILES 2>/dev/null || true)
+                  if [ -z "$DIFF" ]; then
+                    ACTION="DROP"
+                    REASON="Changes already in upstream"
+                  fi
+                fi
+              fi
+            fi
+            
+            SHORT_SHA=$(echo $commit | cut -c1-7)
+            echo "| \`$SHORT_SHA\` | $subject | **$ACTION** | $REASON |" >> rewrite-report.md
+          done < commits.txt
+
+      - name: Upload Rewrite Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rewrite-report-${{ inputs.fork_branch }}
+          path: rewrite-report.md
+          
+      - name: Manual Rewrite Instructions
+        run: |
+          echo "## Manual Action Required" >> $GITHUB_STEP_SUMMARY
+          echo "An analysis report has been generated and uploaded as an artifact." >> $GITHUB_STEP_SUMMARY
+          echo "To complete the rewrite safely:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download and review the **rewrite-report** artifact." >> $GITHUB_STEP_SUMMARY
+          echo "2. Fetch the backup branch: \`git fetch origin ${{ env.backup_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Perform an interactive rebase locally: \`git rebase -i origin/${{ inputs.upstream_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Use the report to guide your keep/squash/drop decisions." >> $GITHUB_STEP_SUMMARY
+          echo "5. Verify the rewrite: \`git diff ${{ inputs.fork_branch }} ${{ env.backup_branch }}\` (should be empty for code changes)" >> $GITHUB_STEP_SUMMARY
+          echo "6. Force push: \`git push --force-with-lease origin ${{ inputs.fork_branch }}\`" >> $GITHUB_STEP_SUMMARY

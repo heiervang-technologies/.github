@@ -38,7 +38,14 @@ All of the following changes go into **one commit** with message `docs: add ht-f
   - Link to [HT Discussions](https://github.com/orgs/heiervang-technologies/discussions) for all inquiries
 - [ ] If no CONTRIBUTING.md exists, create one with the HT section + a brief note to follow upstream contribution guidelines for non-fork-specific changes
 
+### Workflow management
+
+- [ ] Disable all upstream workflows: `gh workflow list -R heiervang-technologies/<repo> --all` then `gh workflow disable <id> -R ...` for each non-HT workflow
+- [ ] Enable pre-commit/lint CI if upstream has one: `gh workflow enable <id> -R ...`
+- [ ] If the enabled CI workflow only triggers on `main`/`master`, add `ht` to `on.push.branches` and/or `on.pull_request.branches` in the workflow YAML, commit to `ht`
+
 ### Post-setup
+- [ ] Enable issues in GitHub repo settings (`gh repo edit --enable-issues`)
 
 - [ ] Verify `ht` branch has clean linear history on top of `main`
 - [ ] Force-push `ht` if history was rewritten: `git push --force-with-lease origin ht`

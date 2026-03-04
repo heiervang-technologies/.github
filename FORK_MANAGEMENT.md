@@ -179,6 +179,60 @@ When AI agents (Claude Code, Copilot, etc.) work on HT fork repositories:
 - **NEVER** delete protected branches or backup branches.
 - When in doubt about whether an action affects upstream or shared state, **ask first**.
 
+## Workflow Management
+
+Forked repos inherit all upstream GitHub Actions workflows. To avoid unnecessary CI costs and noise:
+
+### Default Policy
+
+- **Disable all upstream workflows** immediately after forking
+- **Keep only HT workflows** active (e.g., `Fork Sync`, `Fork Rewrite`)
+- **Enable pre-commit/lint CI** if the upstream repo has one, so code quality checks run on `ht`
+
+### Disabling Upstream Workflows
+
+```bash
+# List all workflows
+gh workflow list -R heiervang-technologies/<repo> --all
+
+# Disable a workflow by ID
+gh workflow disable <id> -R heiervang-technologies/<repo>
+```
+
+### Enabling Pre-Commit / Lint CI
+
+If the upstream repo has a pre-commit, lint, or lightweight CI workflow, enable it and ensure it triggers on the `ht` branch:
+
+1. Enable the workflow:
+   ```bash
+   gh workflow enable <id> -R heiervang-technologies/<repo>
+   ```
+
+2. Check the workflow file's branch triggers (`on.push.branches`, `on.pull_request.branches`). If it only references `main` (or `master`), add `ht`:
+   ```yaml
+   # Before
+   on:
+     push:
+       branches: [main]
+
+   # After
+   on:
+     push:
+       branches: [main, ht]
+   ```
+
+3. Commit the change to the `ht` branch.
+
+### Re-Enabling Other Workflows
+
+Any upstream workflow can be selectively re-enabled when needed:
+
+```bash
+gh workflow enable <id> -R heiervang-technologies/<repo>
+```
+
+Remember to add `ht` to branch triggers if the workflow should run on HT changes.
+
 ## Setting Up a New Fork
 
 1. Fork the upstream repo on GitHub
@@ -195,6 +249,7 @@ When AI agents (Claude Code, Copilot, etc.) work on HT fork repositories:
    ```bash
    gh repo edit --default-branch ht
    ```
-5. Add the PR template checkbox for HT fork changes
-6. Add the HT Fork Changes section to the README
-7. (Optional) Brand the logo with the HT avatar overlay
+5. Disable all upstream workflows, enable pre-commit/lint CI with `ht` branch trigger
+6. Add the PR template checkbox for HT fork changes
+7. Add the HT Fork Changes section to the README
+8. (Optional) Brand the logo with the HT avatar overlay

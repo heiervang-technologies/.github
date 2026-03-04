@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.upstream_branch }}
           fetch-depth: 0
           token: ${{ secrets.gh_pat }}
 
@@ -56,7 +56,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync main with upstream
+      - name: Sync ${{ inputs.upstream_branch }} with upstream
         id: sync
         env:
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
@@ -71,21 +71,21 @@ jobs:
           UPSTREAM_SHA=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
 
-          # Check if main is already up to date
+          # Check if local branch is already up to date
           if [ "$MAIN_SHA_BEFORE" = "$UPSTREAM_SHA" ]; then
-            echo "main is already up to date with upstream"
+            echo "$UPSTREAM_BRANCH is already up to date with upstream"
             echo "new_commits=false" >> $GITHUB_OUTPUT
             echo "main_sha_after=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Fast-forward only — if this fails, main has diverged (bad state)
+          # Fast-forward only — if this fails, local branch has diverged (bad state)
           if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
-            echo "::error::main has diverged from upstream — manual intervention required"
+            echo "::error::$UPSTREAM_BRANCH has diverged from upstream — manual intervention required"
             exit 1
           fi
 
-          git push origin main
+          git push origin "$UPSTREAM_BRANCH"
 
           MAIN_SHA_AFTER=$(git rev-parse HEAD)
           echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
@@ -144,18 +144,19 @@ jobs:
                 git push origin --delete "$old_backup" 2>/dev/null || true
               done
 
-      - name: Rebase ht on main
+      - name: Rebase ht on ${{ inputs.upstream_branch }}
         id: rebase
         if: steps.check-conflict.outputs.conflict_exists == 'false'
         env:
           FORK_BRANCH: ${{ inputs.fork_branch }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
         run: |
-          git fetch origin main
+          git fetch origin "$UPSTREAM_BRANCH"
 
-          HT_COMMIT_COUNT=$(git rev-list --count origin/main..HEAD)
-          echo "ht has $HT_COMMIT_COUNT commits on top of main"
+          HT_COMMIT_COUNT=$(git rev-list --count "origin/$UPSTREAM_BRANCH..HEAD")
+          echo "ht has $HT_COMMIT_COUNT commits on top of $UPSTREAM_BRANCH"
 
-          REBASE_OUTPUT=$(git rebase origin/main 2>&1) && REBASE_OK=true || REBASE_OK=false
+          REBASE_OUTPUT=$(git rebase "origin/$UPSTREAM_BRANCH" 2>&1) && REBASE_OK=true || REBASE_OK=false
 
           if [ "$REBASE_OK" = 'true' ]; then
             echo "status=success" >> $GITHUB_OUTPUT
@@ -184,12 +185,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.gh_pat }}
           FORK_BRANCH: ${{ inputs.fork_branch }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
           CONFLICTS: ${{ steps.rebase.outputs.conflicts }}
         run: |
-          BODY="""## Rebase Conflict: \`$FORK_BRANCH\` on \`main\`
+          BODY="""## Rebase Conflict: \`$FORK_BRANCH\` on \`$UPSTREAM_BRANCH\`
 
-          The automated rebase of \`$FORK_BRANCH\` onto the latest \`main\` (synced from \`$UPSTREAM_REPO\`) failed due to conflicts.
+          The automated rebase of \`$FORK_BRANCH\` onto the latest \`$UPSTREAM_BRANCH\` (synced from \`$UPSTREAM_REPO\`) failed due to conflicts.
 
           ### Conflicting Files
           \`\`\`
@@ -200,7 +202,7 @@ jobs:
           \`\`\`bash
           git fetch origin
           git checkout $FORK_BRANCH
-          git rebase origin/main
+          git rebase origin/$UPSTREAM_BRANCH
           # Resolve conflicts...
           git rebase --continue
           git push --force-with-lease origin $FORK_BRANCH
@@ -215,7 +217,7 @@ jobs:
 
           gh label create "sync-conflict" --color "d73a4a" --description "Upstream sync rebase conflict" 2>/dev/null || true
           gh issue create \
-            --title "Rebase conflict: $FORK_BRANCH on main ($(date +%Y-%m-%d))" \
+            --title "Rebase conflict: $FORK_BRANCH on $UPSTREAM_BRANCH ($(date +%Y-%m-%d))" \
             --label "sync-conflict" \
             --body "$BODY"
           echo "Created new conflict issue"

@@ -1,6 +1,6 @@
 # Heiervang Technologies
 
-**MAJOR UPCOMING RELEASE** ```March 30th 15:00-17:00 2026```: Stay tuned...
+
 
 Welcome! 👋
 

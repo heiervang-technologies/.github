@@ -167,31 +167,48 @@ jobs:
     uses: heiervang-technologies/core/.github/workflows/spawn-agent.yml@main
     with:
       prompt: |
-        You are running headless to auto-resolve a rebase conflict in this HT fork.
+        You are running headless to auto-resolve a rebase conflict in an HT fork.
 
         Repo: ${{ github.repository }}
         Fork branch: ${{ inputs.fork_branch }}
         Upstream branch: ${{ inputs.upstream_branch }} (synced from ${{ inputs.upstream_repo }})
-        Pre-resolve SHA tag: see most recent `pre-autoresolve-*` tag for rollback.
 
-        Conflicting files:
+        Conflicting files (from deterministic ladder):
         ${{ needs.deterministic.outputs.conflict_files }}
 
-        Steps:
-        1. `git fetch origin ${{ inputs.upstream_branch }}`
-        2. `git checkout ${{ inputs.fork_branch }}`
-        3. `git rebase origin/${{ inputs.upstream_branch }}` — handle each conflict by reading the surrounding code on both sides and merging intelligently.
-           Read `~/ht/forks/FORK_MAINTENANCE_DIARY.md` for known drift categories and resolution patterns specific to this fork family.
-        4. After all conflicts resolved, `git rebase --continue` (loop until done).
-        5. Run any obvious smoke check (e.g. `python -c "import <pkg>"` or upstream's lint) if cheap.
-        6. **Verify** `git diff origin/${{ inputs.upstream_branch }}..HEAD` is non-empty (catches catastrophic flatten-to-upstream).
-        7. `git push --force-with-lease origin ${{ inputs.fork_branch }}`
-        8. Report a one-paragraph summary of which drift category each conflict matched and how you resolved it.
+        ## Setup the fork-sync-conflict skill
 
-        Hard rules:
-        - Never push to ${{ inputs.upstream_branch }} on origin.
-        - Never delete tags starting with `pre-autoresolve-` or `ht-backup-`.
-        - If you cannot resolve confidently, exit with a clear error message — the workflow will file a tracking issue automatically.
+        Before resolving, install the skill so you have the recipe loaded:
+
+        ```bash
+        mkdir -p ~/.claude/skills
+        gh api repos/heiervang-technologies/.github/contents/skills/fork-sync-conflict/SKILL.md \
+          --jq '.content' | base64 -d > ~/.claude/skills/fork-sync-conflict.md
+        # also pull the patterns catalog the skill references
+        gh api repos/heiervang-technologies/.github/contents/FORK_DRIFT_PATTERNS.md \
+          --jq '.content' | base64 -d > /tmp/FORK_DRIFT_PATTERNS.md
+        ```
+
+        Then read both files in full before touching any code. They encode the
+        decision flow, the nine drift categories with default actions, and the
+        hard safety rules (never push main, never delete safety tags, validate
+        before push, etc.).
+
+        ## Execute the resolution
+
+        Follow the SKILL.md decision flow exactly. The deterministic ladder has
+        already exhausted lock-file and generated-file fast paths, so what
+        remains are semantic conflicts requiring judgment. The most recent
+        `pre-autoresolve-*` tag on origin is your rollback point — do not delete
+        it.
+
+        On success: force-push fork_branch with `--force-with-lease` and
+        comment on any open `sync-conflict` issue with the structured summary
+        from the skill's Observability section.
+
+        On bail: exit non-zero with a one-paragraph reason. The workflow will
+        file/update a tracking issue. A flagged issue with your analysis is
+        more useful than a wrong autoresolve.
       summary_title: "Fork Conflict Auto-Resolve"
       summary_metadata: '{"fork_branch": "${{ inputs.fork_branch }}", "upstream": "${{ inputs.upstream_repo }}/${{ inputs.upstream_branch }}"}'
       execution_mode: kubernetes

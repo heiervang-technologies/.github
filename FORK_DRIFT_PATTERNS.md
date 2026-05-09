@@ -130,6 +130,25 @@ This is the **public/internal** version — operational secrets, sync history, a
 
 ---
 
+### 10. Deployment Governance Drift / Unsanctioned Image Channel
+
+**What**: An image reaches prod via a path that bypasses the fork's CI pipeline. An operator manually `skopeo`-copies an upstream image into the fork's registry namespace, sometimes hand-tagging it with branch suffixes (`-main`, `-ht`, `-voices`) that the fork's own `docker-publish.yml` does not produce. The image then looks plausibly home-grown but lacks any HT-specific patches.
+
+**Examples**:
+- `ht-vllm-omni 1cd52104-main` (2026-05-09 incident): operator pinned this tag in `cloud/k8s/ai/vllm-omni-tts.yaml` while `ht` had a known compat issue with current vllm. The YAML comment documented the reason. After `ht` caught up (commit `739c1e66` bumped the vllm base), the comment became stale but the pin was not updated. Crashed every `/v1/audio/speech` because upstream `1cd52104` predated HT's speaker/voice alias fix (cherry-pick of upstream PR#2424 that `ht` carried as `7ae20e10`). Producer was manual `skopeo`, not any workflow.
+
+**Resolution pattern**:
+- **Tag-suffix gate at the registry side**: deployment-time admission rule that refuses any image whose tag does not end in the fork-owned suffix (`-ht` for HT forks). Belongs in `cloud/`, not the fork.
+- When operators reach for upstream-pinned images, treat it as a signal that the fork has fallen behind — resolve the parked rebase rather than let the temporary pin become permanent. If a YAML comment claims the fork is incompatible, verify against current fork `HEAD` before trusting it.
+- Fork's `docker-publish.yml` should set explicit `type=ref,event=branch` + `type=sha,suffix={{branch}}` so its own production tags carry a branch suffix and can be recognized by the registry-side rule.
+- This category is also relevant for [Phase 5 security scanning](FORK_AUTOMATION_PLAN.md#phase-5-upstream-security-scan-future--multi-step-extension) — manually-skopeo'd images bypass any future security-scan job too. The registry gate is the chokepoint.
+
+**Frequency**: rare in absolute terms (operator decision under pressure), but the impact is full-prod-down for the affected service and the diagnostic chain is non-obvious from fork-side alone — requires correlating registry tags with deployment manifest with operator history. High debugging cost.
+
+**Detection**: audit each fork's deployment manifest against the set of tags producible by that fork's own `docker-publish.yml`. Any tag in prod not in the producible set is a candidate.
+
+---
+
 ## Per-Fork Drift Profile
 
 | Fork | Primary Drift Types | Chronic Conflicts | Notes |

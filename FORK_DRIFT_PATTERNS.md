@@ -95,10 +95,12 @@ This is the **public/internal** version — operational secrets, sync history, a
 **What**: Both HT and upstream independently implement the same feature with different function names, validation logic, or code structure. After rebase, both implementations coexist silently.
 
 **Examples**:
-- `ht-vllm-omni` streaming audio: HT implemented `_stream_progressive_audio` and `_make_wav_header`; upstream independently added `_generate_audio_chunks` and `_create_wav_header`. Both exist after rebase, doubling the surface area.
+- `ht-vllm-omni` streaming audio: HT implemented `_stream_progressive_audio` and `_make_wav_header`; upstream independently added `_generate_audio_chunks` and `_create_wav_header`. Both exist after rebase, doubling the surface area. **Concrete cost** (2026-05-09 prod incident): caused engine death after ~1-2 requests in production; required a 3+ hour incident response and a rollback to `speaker-alias-v1`. Tracked in [ht-vllm-omni#39](https://github.com/heiervang-technologies/ht-vllm-omni/issues/39) as a must-fix-in-rebase. Code2Wav file was byte-identical between the working era (`d6fb9083`) and current `ht` HEAD, confirming the latent bug was introduced by HT's `d5692616` (progressive WAV streaming, 2026-04-22) and survived undetected because no prior production load reached the trigger threshold.
 - `ht-vllm-omni` `stream` field: HT added `stream: bool` to protocol; upstream later added the same field with richer pydantic validation. If both survive rebase, pydantic silently uses the last definition.
 
 **Resolution**: after every sync, diff `ht` against `upstream/main` and audit each modified file for duplicate helpers, redundant validation, and dead code paths. When upstream adds equivalent functionality, remove HT's version and adopt upstream's pattern. If HT's version is genuinely better, contribute it via the personal fork — but the HT org fork should not carry both implementations long-term.
+
+**Process note from the 2026-05-09 incident**: when a Cat 7 duplicate causes a prod incident, file an issue capturing diagnostic context (suspected commit, byte-level evidence, why prior production didn't surface it) BEFORE the rollback erases the evidence trail. Otherwise the eventual rebase will just re-introduce the bug.
 
 **Frequency**: medium-high for forks where HT and upstream are working on the same features concurrently.
 

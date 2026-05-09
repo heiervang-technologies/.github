@@ -109,6 +109,30 @@ Exit early and let the issue-fallback handle it if any of these hold:
 
 A flagged issue with your analysis is more useful than a wrong autoresolve.
 
+## Temporary security watch (while reading the upstream diff)
+
+Until the dedicated security-scan job ships (Phase 5, see `FORK_AUTOMATION_PLAN.md`), this skill carries a best-effort backstop. While you're reading conflict diffs to resolve them, also notice:
+
+- obfuscated payloads (base64 / hex blobs in normally-text files)
+- postinstall / preinstall scripts in package manifests fetching external code
+- sudden new outbound network calls in build / install / setup scripts
+- typosquat-shaped dependency renames
+- silent removal of validation / auth / signature checks
+- unexpected privilege escalation in install paths
+
+If something looks suspicious — even faintly — handle it like this:
+
+1. **NEVER put exploit specifics in any public-visible artifact.** No PoC, no vulnerable code paths, no repro steps in the issue body. Keep specifics in the workflow run logs (private to the org).
+2. Append a `## Security watch` section to the `sync-conflict` issue you create or update, containing ONLY:
+   - severity guess: `low` | `medium` | `high` | `critical`
+   - upstream commit SHA(s) involved
+   - one sentence on the *category* of concern (e.g. "obfuscated payload in postinstall script") — no specifics
+   - workflow run URL
+3. Mention `@marksverdhei` in the issue body so GitHub emails the owner. This is the temporary notification channel until Phase 5 (irondome + Proton-to-Proton mail) replaces it.
+4. If severity is `critical` AND your confidence is high, exit non-zero AFTER filing the issue so the rebased `ht` is not force-pushed. Default `pre-autoresolve-*` tag is the rollback point.
+
+This is a backstop, not a scanner. Don't chase ghosts; flag, don't speculate.
+
 ## Observability
 
 When you finish (success or bail), produce a short structured summary:

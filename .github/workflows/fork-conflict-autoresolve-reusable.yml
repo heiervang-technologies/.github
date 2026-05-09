@@ -209,6 +209,43 @@ jobs:
         On bail: exit non-zero with a one-paragraph reason. The workflow will
         file/update a tracking issue. A flagged issue with your analysis is
         more useful than a wrong autoresolve.
+
+        ## TEMPORARY: security watch (until Phase 5 + irondome land)
+
+        While reading the upstream diff to resolve conflicts, also keep an eye
+        out for anything that smells like a supply-chain attack or new CVE in
+        the upstream commits being absorbed:
+
+        - obfuscated payloads (base64 / hex blobs in normally-text files)
+        - postinstall scripts in package manifests that fetch external code
+        - sudden new outbound network calls in build / install / setup scripts
+        - typosquat-shaped dependency renames
+        - silent removal of validation / auth / signature checks
+        - unexpected privilege escalation (sudo / setuid / chmod 777 in install)
+
+        If you spot anything suspicious — even "probably nothing":
+
+        1. **Do NOT include exploit details** (PoC, vulnerable code path,
+           reproduction steps) in any public-visible artifact. Keep specifics
+           in the workflow run logs only — the run is private to the org.
+        2. When you file or update the `sync-conflict` issue, add a
+           `## Security watch` section with ONLY:
+           - severity guess (`low` / `medium` / `high` / `critical`)
+           - the upstream commit SHA(s) involved
+           - one sentence describing the *category* of concern (no specifics)
+           - the workflow run URL
+        3. Mention `@marksverdhei` in the issue body so GitHub emails the owner.
+           This is the temporary notification channel until Phase 5 (security
+           scan + irondome private findings + Proton-to-Proton mail) is built.
+        4. If severity is `critical` and you have *high* confidence, exit
+           non-zero AFTER filing the issue. The workflow will then NOT
+           force-push the rebased ht. The conflict-resolution work itself
+           is still recorded in the workflow logs for review.
+
+        This is a best-effort backstop only — not a real security scanner.
+        Phase 5 will replace it with a dedicated `security-scan` job, the
+        full deterministic→pattern→LLM ladder, and findings filed in
+        `heiervang-technologies/irondome`.
       summary_title: "Fork Conflict Auto-Resolve"
       summary_metadata: '{"fork_branch": "${{ inputs.fork_branch }}", "upstream": "${{ inputs.upstream_repo }}/${{ inputs.upstream_branch }}"}'
       execution_mode: kubernetes

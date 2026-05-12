@@ -89,6 +89,21 @@ git push --force-with-lease origin ht
 
 Then comment on the open `sync-conflict` issue (if any) with a one-paragraph summary: which drift categories applied, what you did per file, and the new `ht` SHA. Close the issue.
 
+## rerere caveat (read this before you touch a conflict)
+
+`git rerere` ("reuse recorded resolution") looks tempting for HT forks because the same conflicts recur every sync (Drift Cat 1 / 2). **It is unsafe to trust on long-lived divergences and you should default to disabling it.**
+
+Why: rerere caches a resolution keyed by the conflict hunk's content, not by the surrounding structural context. When the surrounding code has changed between conflict-encounters (which it always does on a long-lived fork), rerere can apply a *stale* resolution that drops later commits' changes silently. No conflict markers, no warning — just a working tree that looks plausibly correct but is missing real HT work.
+
+**Near-miss (ht-llama.cpp, 2026-05-12)**: rerere had cached resolutions from exploratory merges on May 3rd. A fresh merge of `origin/ht` (which had since gained LoRA dedupe + auto-discovery in `tools/server/server-models.cpp`) silently applied the May 3rd resolution to that file. The entire LoRA dedupe block, new `common_lora_adapter_info` fields, and the `gguf_is_lora_adapter` signature changes were dropped. Caught only by spot-checking against `origin/ht`.
+
+**Standing rule**:
+- Default: `git config rerere.enabled false` before any resolution work on an HT fork.
+- If you opt in for a tight-loop standing-rule case (e.g. `studio/setup.sh` in ht-unsloth, where the resolution genuinely is "always take upstream"): first verify the rr-cache is fresh and matches the current structural context. Otherwise nuke it: `mv .git/rr-cache .git/rr-cache.bak.$(date +%Y%m%d)`.
+- Never enable rerere in CI automation that runs across many forks with shared cache — there's no shared cache mechanism that's safe across forks anyway, but defense-in-depth.
+
+The autopilot workflow (`fork-conflict-autoresolve-reusable.yml`) sets `rerere.enabled false` by default. Don't override.
+
 ## Hard safety rules — never violate
 
 1. **Never push to `main` or `master` on origin.** The FF-only sync owns that.

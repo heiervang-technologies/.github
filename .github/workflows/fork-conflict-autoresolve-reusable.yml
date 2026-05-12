@@ -71,7 +71,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config rerere.enabled true
+          # rerere is intentionally disabled — see SKILL.md "rerere caveat".
+          # Stale rerere cache from earlier exploratory merges can silently
+          # auto-resolve a conflict using a resolution made in a different
+          # structural context, dropping later HT commits. Caught as a
+          # near-miss on ht-llama.cpp 2026-05-12 when cached May 3rd
+          # resolutions silently dropped the LoRA dedupe block in
+          # server-models.cpp. Disabled by default; opt in only if you've
+          # verified the cache is fresh.
+          git config rerere.enabled false
           git config merge.conflictstyle diff3
 
       - name: Tag pre-resolve safety point
@@ -95,10 +103,12 @@ jobs:
           set +e
           git fetch origin "$UPSTREAM_BRANCH"
 
-          echo "=== Strategy 1: rebase with rerere ==="
+          echo "=== Strategy 1: clean rebase attempt ==="
+          # No rerere — see SKILL.md "rerere caveat". This is a clean-slate
+          # rebase; it only succeeds if there are no real conflicts.
           if git rebase "origin/$UPSTREAM_BRANCH"; then
             echo "status=resolved" >> $GITHUB_OUTPUT
-            echo "Clean rebase via rerere"
+            echo "Clean rebase, no conflicts"
             exit 0
           fi
           git rebase --abort 2>/dev/null || true

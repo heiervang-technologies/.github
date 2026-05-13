@@ -36,7 +36,7 @@ Find this fork's row in `## Per-Fork Drift Profile` — it tells you which drift
 
 ### Step 2 — categorize each conflict
 
-For every conflicting file, match it to one of the nine drift categories in `/tmp/drift_patterns.md`:
+For every conflicting file, match it to one of the eleven drift categories in `/tmp/drift_patterns.md`:
 
 | # | Category | Default action |
 |---|----------|----------------|
@@ -48,7 +48,9 @@ For every conflicting file, match it to one of the nine drift categories in `/tm
 | 6 | Convergence (upstream absorbed equivalent of HT) | The HT commit is now redundant — `git rebase --skip` if the commit becomes empty after applying upstream. |
 | 7 | Duplicate implementation | Adopt upstream's version, remove HT's. If HT's is materially better, leave a note (don't carry both). |
 | 8 | Metadata / attribution | Keep upstream's copyright headers. HT should not have modified them. |
-| 9 | History rewrite | Only proceed if a `pre-autoresolve-*` or `ht-backup-*` tag exists for rollback. |
+| 9 | History rewrite | **Autopilot bails — operator territory.** Force-resetting `main` violates rule #1 and requires human judgment about backup-tag freshness. Exit non-zero and let the issue-fallback file a ticket. |
+| 10 | Deployment governance / unsanctioned image | Out of scope for the rebase autopilot — this is a registry-side concern (manifest pin vs producible-tag set). Note it in the sync-conflict issue if observed; do not attempt to "resolve" it during rebase. |
+| 11 | Silent merge anomalies | Not a per-file conflict — runs as a post-rebase scan. Execute the three-way delta triangulation + survival check from Cat 11. Any `mvU≈0` row or HT-only file touched by a dropped commit goes into the validation report. Do not push if either check is unresolved. |
 
 ### Step 3 — resolve, file by file
 

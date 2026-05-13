@@ -126,7 +126,7 @@ This is the **public/internal** version — operational secrets, sync history, a
 **Examples**:
 - `ht-codex`: upstream rebased history — 42 commits on HT's main not in upstream, 412 new upstream commits. Required `git reset --hard upstream/main && git push --force` on `main` (not `ht`).
 
-**Resolution**: force-reset `main` to `upstream/main`. Then rebase `ht` onto new `main`. **This is rare but disruptive — only proceed if a backup tag exists for rollback.**
+**Resolution**: force-reset `main` to `upstream/main`, then rebase `ht` onto new `main`. **Operator territory, not autopilot.** Force-pushing `main` violates the autopilot's hard safety rule #1 (no push to `main`/`master`), and verifying that the backup tag is fresh enough to roll back to requires human judgment about how much fork-side work post-dates it. The autopilot must bail on Cat 9 and let the issue-fallback file a tracking ticket.
 
 **Frequency**: rare. Only seen with newer / less-stable upstreams.
 

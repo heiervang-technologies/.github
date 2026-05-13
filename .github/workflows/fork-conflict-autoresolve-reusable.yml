@@ -200,9 +200,15 @@ jobs:
         ```
 
         Then read both files in full before touching any code. They encode the
-        decision flow, the nine drift categories with default actions, and the
-        hard safety rules (never push main, never delete safety tags, validate
-        before push, etc.).
+        decision flow, the eleven drift categories with default actions, the
+        resolution-time anti-patterns (soft-reset erasure, endurance waivers,
+        peer-agent contradictions, runbook staleness), and the hard safety
+        rules (never push main, never delete safety tags, validate before
+        push, etc.). For Cat 9 (history rewrite) and Cat 10 (deployment
+        governance) the default action is bail — these are operator/registry
+        territory, not autopilot work. For Cat 11 (silent merge anomalies),
+        run the three-way delta triangulation + survival check as a
+        post-rebase scan; do not push if either check is unresolved.
 
         ## Execute the resolution
 
@@ -261,6 +267,14 @@ jobs:
       execution_mode: kubernetes
       model: ${{ inputs.llm_model }}
     secrets:
+      # NOTE (2026-05-13): the org-level secrets HAI_DOCKER_PAT and KUBECONFIG
+      # currently have "selected repositories" / private-only visibility at
+      # heiervang-technologies, so docker_pat and kubeconfig will arrive empty
+      # on PUBLIC forks (e.g. ht-llama.cpp). The K8s spawn-agent job will then
+      # fail to pull the snail image / authenticate against the cluster. To
+      # extend LLM autoresolve to public forks, widen those org-secret
+      # visibilities to include the public repos (or move them to repo-level).
+      # Until then, the LLM fallback only fires on private forks.
       DOCKER_PAT: ${{ secrets.docker_pat }}
       GH_PAT: ${{ secrets.gh_pat }}
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_oauth }}

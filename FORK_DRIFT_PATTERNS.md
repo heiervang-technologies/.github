@@ -213,6 +213,7 @@ For each HT-only file, read the dropped commit's diff and confirm each `+`/`-` l
 | ht-codex | History rewrite | None currently | Young upstream, expect instability |
 | ht-llama.cpp | API surface, CI, UI, silent merge anomalies | Server internals during major releases | Very active upstream, high churn. Rerere near-miss 2026-05-12 on `server-models.cpp` — see SKILL.md "rerere caveat". |
 | ht-LlamaFactory | Minimal | None observed | Low HT diff |
+| ht-mergekit | Minimal | None observed | Low HT diff. Active 2026-05-13. |
 | ht-pytorch | Minimal | None | Pure additive HT delta (docs + CI) |
 | ht-unsloth | File restructuring | `studio/setup.sh` (every sync) | **Standing rule: take upstream** |
 | ht-vibe | None observed | None | Upstream less active |

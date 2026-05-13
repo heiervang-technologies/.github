@@ -104,6 +104,36 @@ Why: rerere caches a resolution keyed by the conflict hunk's content, not by the
 
 The autopilot workflow (`fork-conflict-autoresolve-reusable.yml`) sets `rerere.enabled false` by default. Don't override.
 
+## Resolution-time anti-patterns (process hazards)
+
+These are not drift shapes in the upstream — they are *your* failure modes as the resolving agent. All four were caught in real rebases. They feel like shortcuts when you're deep in a conflict; they aren't.
+
+### Soft-reset erasure (looks like a clever flatten, is actually a feature-loss)
+
+Tempting move: `git reset --soft upstream/main && git commit -m "rebase"` — produces a single HT commit on upstream's tip with the right tree. Looks like a fast flatten.
+
+What it actually does: the resulting tree contains HT's files but **silently erases every file that exists only in upstream's `master..main` range**. Tree-identity preserves the HT side; it does not preserve upstream-only paths. You will lose hundreds of upstream-only files with zero conflict markers.
+
+**Rule**: never resolve a divergent rebase via soft-reset. Use `git merge upstream/main` (then resolve conflicts) and *separately* linearize via `git checkout -b ht-linear upstream/main; git checkout ht-merged -- .; git commit` if you want a single commit. The checkout-from-merged step is what preserves upstream-only files.
+
+### Endurance-impaired waivers (you're tired and reaching for `--no-verify`)
+
+After a long resolution session, the temptation to disable a failing check rises: `git commit --no-verify`, `eslint-disable`, `// @ts-ignore`, "we can fix this in a follow-up". These checks usually catch the silent-feature-loss class of bugs — strategy (a) prop-loosening on upstream interfaces that hides a missing HT caller-update.
+
+**Rule**: if you find yourself wanting to bypass a check, that is itself a signal you should bail out and file an issue rather than push. The protocol against waiver-creep is pushback at the call-site, not internal restraint. If the autopilot reaches this point, exit non-zero with a clear summary and let a fresh session pick it up.
+
+### Peer-agent policy contradiction (two voices, one of them wrong)
+
+When coordinating with another agent (e.g. a per-repo dev agent), watch for rule contradictions: one agent says "X is required", the other agent's prior message implied "X is fine". Picking one silently propagates the wrong rule. Surface the conflict.
+
+**Rule**: if two agents (or two prior messages from the same agent) hold contradictory policies, neither agent's local judgment resolves it — escalate to the human (`say` or issue comment) with both positions stated, then wait. Forced consistency without escalation is how silently-wrong rules ship.
+
+### Runbook-hypothesis staleness (your RESUME.md is older than the code)
+
+Resume notes, parked-work READMEs, and issue comments embed *hypotheses about the codebase* at the time of writing. After a rebase advances HEAD, those hypotheses can be wrong — the file you were told to fix may have been renamed, the function signature may have changed, the bug may already be fixed.
+
+**Rule**: before acting on a runbook's named target (file, function, flag), verify it still exists at the named path with the named shape. If not, the runbook is stale — update it before continuing, don't act on the obsolete assumption. A two-line `grep` is cheaper than a wrong fix.
+
 ## Hard safety rules — never violate
 
 1. **Never push to `main` or `master` on origin.** The FF-only sync owns that.

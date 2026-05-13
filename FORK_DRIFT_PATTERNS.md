@@ -151,19 +151,73 @@ This is the **public/internal** version — operational secrets, sync history, a
 
 ---
 
+### 11. Silent Merge Anomalies (Displacement + Survival Duals)
+
+**What**: Two failure modes that share a detection surface but invert their failure direction. Both are invisible to `git status` and to a plain `git diff` review — the merge completes "cleanly", no conflict marker, and the resulting tree looks plausible.
+
+**11a — Silent Displacement (HT content discarded by upstream)**:
+A both-touched file auto-merges with upstream's version winning entirely. HT's delta vanishes. Failure shape: HT improvement / correctness change silently dropped.
+
+**11b — Silent Survival (dropped-commit content persists)**:
+A merge commit message documents "Drops `<SHA>`: `<subject>`", but `<SHA>` modified a file that has no upstream side. The merge can discard the COMMIT lineage but cannot revert the file CONTENT — there is no upstream alternative to triangulate against. Failure shape: a commit listed as dropped still ships its effect.
+
+**Detection — three-way delta triangulation** (covers both):
+
+```bash
+MB=$(git merge-base upstream/main origin/ht)
+# Rename-aware both-touched list (path-equality misses upstream renames):
+ht_files=$(git log --diff-filter=AMR --name-only $MB..origin/ht | sort -u)
+up_files=$(git log --diff-filter=AMR --name-only $MB..upstream/main | sort -u)
+both=$(comm -12 <(echo "$ht_files") <(echo "$up_files"))
+
+for f in $both; do
+  ht=$(git diff $MB..origin/ht -- "$f" | wc -l)
+  up=$(git diff $MB..upstream/main -- "$f" | wc -l)
+  mvU=$(git diff upstream/main -- "$f" | wc -l)   # after merge, vs upstream
+  printf '%-70s ht=%-5d up=%-5d mvU=%-5d\n' "$f" $ht $up $mvU
+done
+```
+
+**Signature**: any line with `ht` large AND `mvU` ≈ 0 is silent displacement — the merged file is identical to upstream, HT delta gone. The triangulation cannot distinguish intentional (Cat 6 convergence) from accidental — that classification is manual.
+
+**Survival check** (separate pass, for each "Drops `<SHA>`" line in the merge message):
+
+```bash
+DROPPED=<sha>
+for f in $(git show --name-only --pretty=format: $DROPPED); do
+  if git ls-tree upstream/main -- "$f" | grep -q .; then
+    echo "$f: upstream-touched — covered by displacement triangulation"
+  else
+    echo "$f: HT-only — VERIFY MANUALLY that $DROPPED's content effect is undone"
+  fi
+done
+```
+
+For each HT-only file, read the dropped commit's diff and confirm each `+`/`-` line is matched (or supplanted) in the merged tree. If not, follow-up commit needed.
+
+**Examples (both from the 2026-05-12 ht-vllm-omni rebase, found in one pass)**:
+- **Displacement (benign Cat 6)**: `examples/online_serving/qwen3_tts/openai_speech_client.py`. HT delta = 13 (`payload["voice"] = args.speaker` rename); upstream delta = 268 (file renamed + rewritten to `.../text_to_speech/qwen3_tts/openai_speech_client.py`). Merged tree = upstream version; the rename carries upstream's logic which already implements HT's intent. Plain path-equality misses this — the rename-aware list is required.
+- **Survival (silent failure)**: `docker/Dockerfile.slim`. HT commit `739c1e66` ("build: bump vllm base to v0.19.1") was documented as dropped in the merge message. But Dockerfile.slim is HT-only (introduced by `406f2448`), so the merge couldn't revert `v0.19.1`. File content survived at v0.19.1 despite the lineage drop. Caught by snoop-kube during image build setup. Follow-up commit `d1ad5ee1` ("build: default Dockerfile.slim base to vllm-openai v0.20.0") fixed it.
+
+**Resolution**: bake the triangulation and survival checks into the post-sync hygiene step (see checklist below). Cost: ~5 minutes per rebase. Catches a class of regressions that diff-review alone does not.
+
+**Frequency**: per-rebase risk on any fork with non-trivial both-touched files OR explicit drop-lines in merge messages. Higher for forks where upstream is restructuring directories (Cat 1 amplifies displacement risk).
+
+---
+
 ## Per-Fork Drift Profile
 
 | Fork | Primary Drift Types | Chronic Conflicts | Notes |
 |------|--------------------|--------------------|-------|
 | ht-ACE-Step-1.5 | File restructuring | `api_server.py` (resolved, now modular) | Upstream actively restructuring |
 | ht-codex | History rewrite | None currently | Young upstream, expect instability |
-| ht-llama.cpp | API surface, CI, UI | Server internals during major releases | Very active upstream, high churn |
+| ht-llama.cpp | API surface, CI, UI, silent merge anomalies | Server internals during major releases | Very active upstream, high churn. Rerere near-miss 2026-05-12 on `server-models.cpp` — see SKILL.md "rerere caveat". |
 | ht-LlamaFactory | Minimal | None observed | Low HT diff |
 | ht-pytorch | Minimal | None | Pure additive HT delta (docs + CI) |
 | ht-unsloth | File restructuring | `studio/setup.sh` (every sync) | **Standing rule: take upstream** |
 | ht-vibe | None observed | None | Upstream less active |
 | ht-vllm | Registry expansion | Model registry blocks | HT entries are permanent fork additions |
-| ht-vllm-omni | API surface, registry, convergence, duplicate impl | Serving endpoints, streaming audio | Most complex HT diff. Upstream convergence via personal fork contributions. |
+| ht-vllm-omni | API surface, registry, convergence, duplicate impl, silent merge anomalies | Serving endpoints, streaming audio | Most complex HT diff. Upstream convergence via personal fork contributions. Both 11a (displacement) and 11b (survival) duals caught in 2026-05-12 rebase. |
 | ht-voxcii | None observed | None | Low HT diff |
 
 ## Post-Sync Hygiene Checklist
@@ -175,6 +229,8 @@ After each sync, especially for high-drift forks (vllm-omni, llama.cpp):
 3. **Copyright scan**: verify no upstream copyright headers were accidentally modified.
 4. **Protocol field check**: for forks with shared protocol definitions, verify no duplicate field definitions survived rebase.
 5. **Prefer upstream patterns**: when upstream added the same feature differently, adopt their approach and remove HT's version.
+6. **Silent merge anomaly check (Cat 11)**: run the three-way delta triangulation against the rename-aware both-touched set and flag any `mvU≈0` row for manual displacement classification. For every "Drops `<SHA>`" line in the merge message, run the survival check on HT-only files touched by `<SHA>`.
+7. **Native-build gate (forks with non-script targets)**: for forks that ship native binaries (e.g. ht-llama.cpp's C++ server, Tauri shells), the drift-zero check must include a fresh build (`cmake --build`, `cargo build`, `npm run build`), not just a typecheck of the script layer. A `tsc`-clean tree can still ship a backend that fails to compile — caught on ht-llama.cpp 2026-05-12 when a missing close-brace in `tools/server/server-models.cpp` produced a 200+-error cascade only visible under `cmake`.
 
 ## See also
 

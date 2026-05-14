@@ -58,6 +58,7 @@ jobs:
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       main_sha_before: ${{ steps.sync.outputs.main_sha_before }}
       main_sha_after: ${{ steps.sync.outputs.main_sha_after }}
+      ht_behind: ${{ steps.sync.outputs.ht_behind }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +76,7 @@ jobs:
         env:
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
           UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          FORK_BRANCH: ${{ inputs.fork_branch }}
         run: |
           MAIN_SHA_BEFORE=$(git rev-parse HEAD)
           echo "main_sha_before=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
@@ -90,27 +92,41 @@ jobs:
             echo "$UPSTREAM_BRANCH is already up to date with upstream"
             echo "new_commits=false" >> $GITHUB_OUTPUT
             echo "main_sha_after=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
-            exit 0
+          else
+            # Fast-forward only — if this fails, local branch has diverged (bad state)
+            if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
+              echo "::error::$UPSTREAM_BRANCH has diverged from upstream — manual intervention required"
+              exit 1
+            fi
+
+            git push origin "$UPSTREAM_BRANCH"
+
+            MAIN_SHA_AFTER=$(git rev-parse HEAD)
+            echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
+            echo "new_commits=true" >> $GITHUB_OUTPUT
+
+            COMMIT_COUNT=$(git rev-list --count "$MAIN_SHA_BEFORE".."$MAIN_SHA_AFTER")
+            echo "Synced $COMMIT_COUNT new commits from upstream"
           fi
 
-          # Fast-forward only — if this fails, local branch has diverged (bad state)
-          if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
-            echo "::error::$UPSTREAM_BRANCH has diverged from upstream — manual intervention required"
-            exit 1
-          fi
-
-          git push origin "$UPSTREAM_BRANCH"
-
-          MAIN_SHA_AFTER=$(git rev-parse HEAD)
-          echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
-          echo "new_commits=true" >> $GITHUB_OUTPUT
-
-          COMMIT_COUNT=$(git rev-list --count "$MAIN_SHA_BEFORE".."$MAIN_SHA_AFTER")
-          echo "Synced $COMMIT_COUNT new commits from upstream"
+          # Compute ht_behind regardless of whether sync-main moved this run.
+          # rebase-ht is gated on this value, not on new_commits, so that a stale
+          # sync-conflict issue closed after a previous skipped run can trigger
+          # the rebase on next dispatch even if upstream has not advanced since.
+          # See: https://github.com/heiervang-technologies/.github/issues -- the
+          # bug was reproduced 2026-05-14 on ht-llama.cpp.
+          git fetch origin "$FORK_BRANCH"
+          HT_BEHIND=$(git rev-list --count "origin/$FORK_BRANCH..upstream/$UPSTREAM_BRANCH" 2>/dev/null || echo 0)
+          echo "ht_behind=$HT_BEHIND" >> $GITHUB_OUTPUT
+          echo "ht is $HT_BEHIND commits behind upstream/$UPSTREAM_BRANCH"
 
   rebase-ht:
     needs: sync-main
-    if: needs.sync-main.outputs.new_commits == 'true' && inputs.skip_rebase != true
+    # Run rebase whenever ht is behind upstream — not just when main moved THIS run.
+    # If a previous run skipped rebase due to an open sync-conflict issue, closing
+    # that issue and re-dispatching should trigger the rebase even if upstream has
+    # not advanced since. Gating on new_commits alone leaves the fork stuck behind.
+    if: needs.sync-main.outputs.ht_behind != '0' && needs.sync-main.outputs.ht_behind != '' && inputs.skip_rebase != true
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.rebase.outputs.status }}

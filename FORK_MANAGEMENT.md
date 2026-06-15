@@ -22,7 +22,19 @@ Each fork has two key branches:
 
 - Contains all HT-specific features, fixes, and configuration on top of `main`
 - Set as the repo's **default branch** on GitHub so that clones, PRs, and the README all reference it
-- All PRs target `ht` unless they're upstream contributions
+- All PRs target `ht`
+- The `ht` branch is **not** for upstreaming — it carries HT-specific changes indefinitely, leaving upstream in peace
+
+## Upstreaming Policy
+
+HT org forks are **not** used to submit PRs upstream. The `ht` branch is intended to carry HT-specific changes permanently.
+
+When a feature developed on an HT fork should be contributed upstream:
+
+1. **Use the personal fork** (marksverdhei) — not the HT org fork
+2. Cherry-pick or copy the relevant branch from the HT fork to the personal fork
+3. Submit the PR from the personal fork to the upstream repo
+4. If the PR is accepted upstream, the corresponding HT commits become redundant and should be dropped during the next rebase (see "Convergence Drift" in the maintenance diary)
 
 ## Commit Hygiene
 

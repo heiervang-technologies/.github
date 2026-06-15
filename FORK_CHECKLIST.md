@@ -4,7 +4,8 @@ Reusable checklist for initializing any new HT fork. Run through this after fork
 
 ### Prerequisites
 
-- [ ] Fork created under [heiervang-technologies](https://github.com/heiervang-technologies) with `ht-` prefix (e.g. `ht-vllm-omni`)
+- [ ] Fork created under [heiervang-technologies](https://github.com/heiervang-technologies) with `ht-` prefix (e.g. `ht-vllm-omni`) — verify with `gh api repos/heiervang-technologies/<name> --jq .name` (404 means the fork does not exist yet; do not proceed with the rest of the checklist)
+- [ ] `origin` points to the HT org fork, not upstream: `git remote get-url origin` should return `...heiervang-technologies/ht-<name>...`. If it returns the upstream URL, the directory is a reference clone, not a fork — either re-clone from the HT fork or `git remote set-url origin <ht-fork-url>` before continuing
 - [ ] Upstream remote added: `git remote add upstream <upstream-url>`
 
 ### Branch setup

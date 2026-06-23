@@ -1,0 +1,352 @@
+name: Reusable Fork Conflict Auto-Resolve
+
+# Purpose-built for the fork-sync autopilot loop.
+# Operates directly on a fork branch (e.g. `ht`) — rebases it onto an
+# upstream branch with a deterministic ladder, falling back to a
+# Snail+Claude agent for semantic conflicts. Force-pushes the resolved
+# fork branch on success. Files a tracking issue on total failure.
+#
+# This is distinct from core/conflict-resolver.yml which is PR-based.
+
+on:
+  workflow_call:
+    inputs:
+      upstream_repo:
+        description: "Full upstream repo (e.g. vllm-project/vllm)"
+        required: true
+        type: string
+      upstream_branch:
+        description: "Upstream/base branch (default main)"
+        required: false
+        default: "main"
+        type: string
+      fork_branch:
+        description: "HT customization branch to rebase (default ht)"
+        required: false
+        default: "ht"
+        type: string
+      use_llm:
+        description: "Allow Snail+Claude fallback for semantic conflicts"
+        required: false
+        default: true
+        type: boolean
+      llm_model:
+        description: "Model passed to spawn-agent (opus, sonnet, ...)"
+        required: false
+        default: "opus"
+        type: string
+    secrets:
+      gh_pat:
+        required: true
+      claude_oauth:
+        required: false
+      docker_pat:
+        required: false
+      kubeconfig:
+        required: false
+    outputs:
+      status:
+        description: "resolved | resolved_llm | failed"
+        value: ${{ jobs.deterministic.outputs.status }}
+
+concurrency:
+  group: fork-resolve-${{ github.repository }}-${{ inputs.fork_branch }}
+  cancel-in-progress: false
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.resolve.outputs.status }}
+      conflict_files: ${{ steps.resolve.outputs.conflict_files }}
+      pre_resolve_sha: ${{ steps.resolve.outputs.pre_resolve_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.fork_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.gh_pat }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # rerere is intentionally disabled — see SKILL.md "rerere caveat".
+          # Stale rerere cache from earlier exploratory merges can silently
+          # auto-resolve a conflict using a resolution made in a different
+          # structural context, dropping later HT commits. Caught as a
+          # near-miss on ht-llama.cpp 2026-05-12 when cached May 3rd
+          # resolutions silently dropped the LoRA dedupe block in
+          # server-models.cpp. Disabled by default; opt in only if you've
+          # verified the cache is fresh.
+          git config rerere.enabled false
+          git config merge.conflictstyle diff3
+
+      - name: Tag pre-resolve safety point
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          PRE_SHA=$(git rev-parse HEAD)
+          TAG="pre-autoresolve-$(date +%Y%m%d-%H%M%S)-${PRE_SHA:0:7}"
+          git tag "$TAG" "$PRE_SHA"
+          git push origin "$TAG"
+          echo "pre_resolve_sha=$PRE_SHA" >> $GITHUB_OUTPUT
+          echo "Tagged rollback point: $TAG @ $PRE_SHA"
+        id: tag
+
+      - name: Attempt resolution ladder
+        id: resolve
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+        run: |
+          set +e
+          git fetch origin "$UPSTREAM_BRANCH"
+
+          echo "=== Strategy 1: clean rebase attempt ==="
+          # No rerere — see SKILL.md "rerere caveat". This is a clean-slate
+          # rebase; it only succeeds if there are no real conflicts.
+          if git rebase "origin/$UPSTREAM_BRANCH"; then
+            echo "status=resolved" >> $GITHUB_OUTPUT
+            echo "Clean rebase, no conflicts"
+            exit 0
+          fi
+          git rebase --abort 2>/dev/null || true
+
+          echo "=== Strategy 2: lock/generated file conflicts ==="
+          # Attempt rebase again, capture conflicts
+          git rebase "origin/$UPSTREAM_BRANCH" 2>/dev/null || true
+          CONFLICTING=$(git diff --name-only --diff-filter=U)
+
+          if [ -z "$CONFLICTING" ]; then
+            # Rebase was actually clean on this run (rare race)
+            echo "status=resolved" >> $GITHUB_OUTPUT
+            git rebase --continue 2>/dev/null || true
+            exit 0
+          fi
+
+          echo "Conflicts in:"
+          echo "$CONFLICTING"
+
+          LOCK_RX='\.lock$|lock\.json$|^uv\.lock$|^poetry\.lock$|^Cargo\.lock$|^package-lock\.json$|^yarn\.lock$|^pnpm-lock\.yaml$'
+          GEN_RX='\.generated\.|\.g\.dart$|\.pb\.go$|_generated\.go$|\.min\.js$|\.min\.css$'
+          NON_TRIVIAL=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if echo "$f" | grep -qE "$LOCK_RX"; then
+              echo "Lock file: $f -> keep ours (will regenerate)"
+              git checkout --ours -- "$f" && git add -- "$f"
+            elif echo "$f" | grep -qE "$GEN_RX"; then
+              echo "Generated: $f -> keep theirs"
+              git checkout --theirs -- "$f" && git add -- "$f"
+            else
+              NON_TRIVIAL="$NON_TRIVIAL $f"
+            fi
+          done <<< "$CONFLICTING"
+
+          if [ -z "$(echo "$NON_TRIVIAL" | xargs)" ]; then
+            if git rebase --continue 2>&1; then
+              echo "status=resolved" >> $GITHUB_OUTPUT
+              echo "All conflicts were lock/generated; auto-resolved"
+              exit 0
+            fi
+          fi
+
+          # Real conflicts remain
+          echo "Non-trivial conflicts in:$NON_TRIVIAL"
+          git rebase --abort 2>/dev/null || true
+
+          echo "conflict_files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONFLICTING" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "status=needs_llm" >> $GITHUB_OUTPUT
+
+      - name: Force-push if deterministically resolved
+        if: steps.resolve.outputs.status == 'resolved'
+        env:
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+        run: |
+          git push --force-with-lease origin "$FORK_BRANCH"
+          echo "Force-pushed deterministically resolved $FORK_BRANCH"
+
+  llm-resolve:
+    needs: deterministic
+    if: |
+      needs.deterministic.outputs.status == 'needs_llm' &&
+      inputs.use_llm == true
+    uses: heiervang-technologies/core/.github/workflows/spawn-agent.yml@main
+    with:
+      prompt: |
+        You are running headless to auto-resolve a rebase conflict in an HT fork.
+
+        Repo: ${{ github.repository }}
+        Fork branch: ${{ inputs.fork_branch }}
+        Upstream branch: ${{ inputs.upstream_branch }} (synced from ${{ inputs.upstream_repo }})
+
+        Conflicting files (from deterministic ladder):
+        ${{ needs.deterministic.outputs.conflict_files }}
+
+        ## Setup the fork-sync-conflict skill
+
+        Before resolving, install the skill so you have the recipe loaded:
+
+        ```bash
+        mkdir -p ~/.claude/skills
+        gh api repos/heiervang-technologies/.github/contents/skills/fork-sync-conflict/SKILL.md \
+          --jq '.content' | base64 -d > ~/.claude/skills/fork-sync-conflict.md
+        # also pull the patterns catalog the skill references
+        gh api repos/heiervang-technologies/.github/contents/FORK_DRIFT_PATTERNS.md \
+          --jq '.content' | base64 -d > /tmp/FORK_DRIFT_PATTERNS.md
+        ```
+
+        Then read both files in full before touching any code. They encode the
+        decision flow, the eleven drift categories with default actions, the
+        resolution-time anti-patterns (soft-reset erasure, endurance waivers,
+        peer-agent contradictions, runbook staleness), and the hard safety
+        rules (never push main, never delete safety tags, validate before
+        push, etc.). For Cat 9 (history rewrite) and Cat 10 (deployment
+        governance) the default action is bail — these are operator/registry
+        territory, not autopilot work. For Cat 11 (silent merge anomalies),
+        run the three-way delta triangulation + survival check as a
+        post-rebase scan; do not push if either check is unresolved.
+
+        ## Execute the resolution
+
+        Follow the SKILL.md decision flow exactly. The deterministic ladder has
+        already exhausted lock-file and generated-file fast paths, so what
+        remains are semantic conflicts requiring judgment. The most recent
+        `pre-autoresolve-*` tag on origin is your rollback point — do not delete
+        it.
+
+        On success: force-push fork_branch with `--force-with-lease` and
+        comment on any open `sync-conflict` issue with the structured summary
+        from the skill's Observability section.
+
+        On bail: exit non-zero with a one-paragraph reason. The workflow will
+        file/update a tracking issue. A flagged issue with your analysis is
+        more useful than a wrong autoresolve.
+
+        ## TEMPORARY: security watch (until Phase 5 + irondome land)
+
+        While reading the upstream diff to resolve conflicts, also keep an eye
+        out for anything that smells like a supply-chain attack or new CVE in
+        the upstream commits being absorbed:
+
+        - obfuscated payloads (base64 / hex blobs in normally-text files)
+        - postinstall scripts in package manifests that fetch external code
+        - sudden new outbound network calls in build / install / setup scripts
+        - typosquat-shaped dependency renames
+        - silent removal of validation / auth / signature checks
+        - unexpected privilege escalation (sudo / setuid / chmod 777 in install)
+
+        If you spot anything suspicious — even "probably nothing":
+
+        1. **Do NOT include exploit details** (PoC, vulnerable code path,
+           reproduction steps) in any public-visible artifact. Keep specifics
+           in the workflow run logs only — the run is private to the org.
+        2. When you file or update the `sync-conflict` issue, add a
+           `## Security watch` section with ONLY:
+           - severity guess (`low` / `medium` / `high` / `critical`)
+           - the upstream commit SHA(s) involved
+           - one sentence describing the *category* of concern (no specifics)
+           - the workflow run URL
+        3. Mention `@marksverdhei` in the issue body so GitHub emails the owner.
+           This is the temporary notification channel until Phase 5 (security
+           scan + irondome private findings + Proton-to-Proton mail) is built.
+        4. If severity is `critical` and you have *high* confidence, exit
+           non-zero AFTER filing the issue. The workflow will then NOT
+           force-push the rebased ht. The conflict-resolution work itself
+           is still recorded in the workflow logs for review.
+
+        This is a best-effort backstop only — not a real security scanner.
+        Phase 5 will replace it with a dedicated `security-scan` job, the
+        full deterministic→pattern→LLM ladder, and findings filed in
+        `heiervang-technologies/irondome`.
+      summary_title: "Fork Conflict Auto-Resolve"
+      summary_metadata: '{"fork_branch": "${{ inputs.fork_branch }}", "upstream": "${{ inputs.upstream_repo }}/${{ inputs.upstream_branch }}"}'
+      execution_mode: kubernetes
+      model: ${{ inputs.llm_model }}
+    secrets:
+      # NOTE (2026-05-13): the org-level secrets HAI_DOCKER_PAT and KUBECONFIG
+      # currently have "selected repositories" / private-only visibility at
+      # heiervang-technologies, so docker_pat and kubeconfig will arrive empty
+      # on PUBLIC forks (e.g. ht-llama.cpp). The K8s spawn-agent job will then
+      # fail to pull the snail image / authenticate against the cluster. To
+      # extend LLM autoresolve to public forks, widen those org-secret
+      # visibilities to include the public repos (or move them to repo-level).
+      # Until then, the LLM fallback only fires on private forks.
+      DOCKER_PAT: ${{ secrets.docker_pat }}
+      GH_PAT: ${{ secrets.gh_pat }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_oauth }}
+      KUBECONFIG: ${{ secrets.kubeconfig }}
+
+  fallback-issue:
+    needs: [deterministic, llm-resolve]
+    if: |
+      always() &&
+      needs.deterministic.outputs.status == 'needs_llm' &&
+      (inputs.use_llm != true || needs.llm-resolve.result != 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: File tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.gh_pat }}
+          FORK_BRANCH: ${{ inputs.fork_branch }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          CONFLICTS: ${{ needs.deterministic.outputs.conflict_files }}
+          LLM_USED: ${{ inputs.use_llm }}
+          LLM_RESULT: ${{ needs.llm-resolve.result }}
+        run: |
+          # Check if an open issue already exists
+          EXISTING=$(gh issue list --label "sync-conflict" --state open --repo "${{ github.repository }}" --json number --jq ".[0].number // empty")
+
+          STATUS_LINE="Deterministic strategies exhausted."
+          if [ "$LLM_USED" = "true" ]; then
+            STATUS_LINE="$STATUS_LINE LLM fallback ran but did not succeed (result: $LLM_RESULT)."
+          else
+            STATUS_LINE="$STATUS_LINE LLM fallback was disabled (use_llm=false)."
+          fi
+
+          BODY=$(cat <<EOF
+          ## Auto-Resolve Failed: \`$FORK_BRANCH\` on \`$UPSTREAM_BRANCH\`
+
+          $STATUS_LINE
+
+          ### Conflicting Files
+          \`\`\`
+          $CONFLICTS
+          \`\`\`
+
+          ### Manual Resolution
+          \`\`\`bash
+          git fetch origin
+          git checkout $FORK_BRANCH
+          git rebase origin/$UPSTREAM_BRANCH
+          # Resolve conflicts...
+          git rebase --continue
+          git push --force-with-lease origin $FORK_BRANCH
+          \`\`\`
+
+          ### Workflow Run
+          [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          A pre-autoresolve tag was pushed before any modification — see the run logs.
+
+          ---
+          *Filed by fork-conflict-autoresolve workflow*
+          EOF
+          )
+
+          gh label create "sync-conflict" --color "d73a4a" --description "Upstream sync rebase conflict" --repo "${{ github.repository }}" 2>/dev/null || true
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body "$BODY"
+            echo "Updated existing issue #$EXISTING"
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "Auto-resolve failed: $FORK_BRANCH on $UPSTREAM_BRANCH ($(date +%Y-%m-%d))" \
+              --label "sync-conflict" \
+              --body "$BODY"
+          fi

@@ -27,10 +27,24 @@ on:
         required: false
         default: true
         type: boolean
+      use_llm_autoresolve:
+        description: "On rebase conflict, attempt deterministic + Snail+Claude resolution. Requires claude_oauth/docker_pat/kubeconfig secrets."
+        required: false
+        default: false
+        type: boolean
     secrets:
       gh_pat:
         description: "PAT with contents:write, issues:write"
         required: true
+      claude_oauth:
+        description: "Claude Code OAuth token (only required if use_llm_autoresolve=true)"
+        required: false
+      docker_pat:
+        description: "Docker Hub PAT for snail image (only required if use_llm_autoresolve=true)"
+        required: false
+      kubeconfig:
+        description: "Kubeconfig for snail K8s execution (only required if use_llm_autoresolve=true)"
+        required: false
 
 concurrency:
   group: fork-sync-${{ github.repository }}
@@ -44,6 +58,7 @@ jobs:
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       main_sha_before: ${{ steps.sync.outputs.main_sha_before }}
       main_sha_after: ${{ steps.sync.outputs.main_sha_after }}
+      ht_behind: ${{ steps.sync.outputs.ht_behind }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,6 +76,7 @@ jobs:
         env:
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
           UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          FORK_BRANCH: ${{ inputs.fork_branch }}
         run: |
           MAIN_SHA_BEFORE=$(git rev-parse HEAD)
           echo "main_sha_before=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
@@ -76,28 +92,45 @@ jobs:
             echo "$UPSTREAM_BRANCH is already up to date with upstream"
             echo "new_commits=false" >> $GITHUB_OUTPUT
             echo "main_sha_after=$MAIN_SHA_BEFORE" >> $GITHUB_OUTPUT
-            exit 0
+          else
+            # Fast-forward only — if this fails, local branch has diverged (bad state)
+            if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
+              echo "::error::$UPSTREAM_BRANCH has diverged from upstream — manual intervention required"
+              exit 1
+            fi
+
+            git push origin "$UPSTREAM_BRANCH"
+
+            MAIN_SHA_AFTER=$(git rev-parse HEAD)
+            echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
+            echo "new_commits=true" >> $GITHUB_OUTPUT
+
+            COMMIT_COUNT=$(git rev-list --count "$MAIN_SHA_BEFORE".."$MAIN_SHA_AFTER")
+            echo "Synced $COMMIT_COUNT new commits from upstream"
           fi
 
-          # Fast-forward only — if this fails, local branch has diverged (bad state)
-          if ! git merge --ff-only "upstream/$UPSTREAM_BRANCH"; then
-            echo "::error::$UPSTREAM_BRANCH has diverged from upstream — manual intervention required"
-            exit 1
-          fi
-
-          git push origin "$UPSTREAM_BRANCH"
-
-          MAIN_SHA_AFTER=$(git rev-parse HEAD)
-          echo "main_sha_after=$MAIN_SHA_AFTER" >> $GITHUB_OUTPUT
-          echo "new_commits=true" >> $GITHUB_OUTPUT
-
-          COMMIT_COUNT=$(git rev-list --count "$MAIN_SHA_BEFORE".."$MAIN_SHA_AFTER")
-          echo "Synced $COMMIT_COUNT new commits from upstream"
+          # Compute ht_behind regardless of whether sync-main moved this run.
+          # rebase-ht is gated on this value, not on new_commits, so that a stale
+          # sync-conflict issue closed after a previous skipped run can trigger
+          # the rebase on next dispatch even if upstream has not advanced since.
+          # See: https://github.com/heiervang-technologies/.github/issues -- the
+          # bug was reproduced 2026-05-14 on ht-llama.cpp.
+          git fetch origin "$FORK_BRANCH"
+          HT_BEHIND=$(git rev-list --count "origin/$FORK_BRANCH..upstream/$UPSTREAM_BRANCH" 2>/dev/null || echo 0)
+          echo "ht_behind=$HT_BEHIND" >> $GITHUB_OUTPUT
+          echo "ht is $HT_BEHIND commits behind upstream/$UPSTREAM_BRANCH"
 
   rebase-ht:
     needs: sync-main
-    if: needs.sync-main.outputs.new_commits == 'true' && inputs.skip_rebase != true
+    # Run rebase whenever ht is behind upstream — not just when main moved THIS run.
+    # If a previous run skipped rebase due to an open sync-conflict issue, closing
+    # that issue and re-dispatching should trigger the rebase even if upstream has
+    # not advanced since. Gating on new_commits alone leaves the fork stuck behind.
+    if: needs.sync-main.outputs.ht_behind != '0' && needs.sync-main.outputs.ht_behind != '' && inputs.skip_rebase != true
     runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.rebase.outputs.status }}
+      conflicts: ${{ steps.rebase.outputs.conflicts }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,8 +213,10 @@ jobs:
           git push --force-with-lease origin "$FORK_BRANCH"
           echo "Successfully force-pushed $FORK_BRANCH"
 
-      - name: Create conflict issue
-        if: steps.rebase.outputs.status == 'conflict'
+      - name: Create conflict issue (legacy fallback)
+        if: |
+          steps.rebase.outputs.status == 'conflict' &&
+          inputs.use_llm_autoresolve != true
         env:
           GH_TOKEN: ${{ secrets.gh_pat }}
           FORK_BRANCH: ${{ inputs.fork_branch }}
@@ -222,8 +257,25 @@ jobs:
             --body "$BODY"
           echo "Created new conflict issue"
 
+  auto-resolve:
+    needs: rebase-ht
+    if: |
+      needs.rebase-ht.outputs.status == 'conflict' &&
+      inputs.use_llm_autoresolve == true
+    uses: heiervang-technologies/.github/.github/workflows/fork-conflict-autoresolve-reusable.yml@main
+    with:
+      upstream_repo: ${{ inputs.upstream_repo }}
+      upstream_branch: ${{ inputs.upstream_branch }}
+      fork_branch: ${{ inputs.fork_branch }}
+      use_llm: true
+    secrets:
+      gh_pat: ${{ secrets.gh_pat }}
+      claude_oauth: ${{ secrets.claude_oauth }}
+      docker_pat: ${{ secrets.docker_pat }}
+      kubeconfig: ${{ secrets.kubeconfig }}
+
   status-check:
-    needs: [sync-main, rebase-ht]
+    needs: [sync-main, rebase-ht, auto-resolve]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -231,18 +283,23 @@ jobs:
         env:
           SYNC_RESULT: ${{ needs.sync-main.result }}
           REBASE_RESULT: ${{ needs.rebase-ht.result }}
+          REBASE_STATUS: ${{ needs.rebase-ht.outputs.status }}
+          AUTORESOLVE_RESULT: ${{ needs.auto-resolve.result }}
           NEW_COMMITS: ${{ needs.sync-main.outputs.new_commits }}
         run: |
           echo "## Fork Sync Summary"
           echo "Sync main: $SYNC_RESULT"
           echo "New commits: $NEW_COMMITS"
-          echo "Rebase ht: $REBASE_RESULT"
+          echo "Rebase ht: $REBASE_RESULT (status=$REBASE_STATUS)"
+          echo "Auto-resolve: $AUTORESOLVE_RESULT"
 
           if [ "$SYNC_RESULT" != 'success' ]; then
             echo "::error::Main sync failed — upstream may have diverged"
             exit 1
           fi
 
-          if [ "$REBASE_RESULT" = "failure" ]; then
-            echo "::warning::Rebase failed — check for conflict issue"
+          if [ "$REBASE_STATUS" = "conflict" ] && [ "$AUTORESOLVE_RESULT" = "success" ]; then
+            echo "Rebase had conflicts but auto-resolve handled them"
+          elif [ "$REBASE_RESULT" = "failure" ] || [ "$AUTORESOLVE_RESULT" = "failure" ]; then
+            echo "::warning::Rebase or auto-resolve failed — check for conflict issue"
           fi

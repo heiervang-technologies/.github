@@ -29,8 +29,12 @@ on:
         type: boolean
     secrets:
       gh_pat:
-        description: "PAT with contents:write, issues:write"
-        required: true
+        description: "Optional PAT with contents:write, issues:write. Defaults to GITHUB_TOKEN."
+        required: false
+
+permissions:
+  contents: write
+  issues: write
 
 concurrency:
   group: fork-sync-${{ github.repository }}
@@ -49,7 +53,7 @@ jobs:
         with:
           ref: ${{ inputs.upstream_branch }}
           fetch-depth: 0
-          token: ${{ secrets.gh_pat }}
+          token: ${{ secrets.gh_pat || github.token }}
 
       - name: Configure git
         run: |
@@ -103,7 +107,7 @@ jobs:
         with:
           ref: ${{ inputs.fork_branch }}
           fetch-depth: 0
-          token: ${{ secrets.gh_pat }}
+          token: ${{ secrets.gh_pat || github.token }}
 
       - name: Configure git
         run: |
@@ -113,7 +117,7 @@ jobs:
       - name: Check for existing conflict issue
         id: check-conflict
         env:
-          GH_TOKEN: ${{ secrets.gh_pat }}
+          GH_TOKEN: ${{ secrets.gh_pat || github.token }}
         run: |
           EXISTING=$(gh issue list --label "sync-conflict" --state open --json number --jq ".[0].number // empty")
           if [ -n "$EXISTING" ]; then
@@ -127,7 +131,7 @@ jobs:
         if: inputs.create_backup == true && steps.check-conflict.outputs.conflict_exists == 'false'
         env:
           FORK_BRANCH: ${{ inputs.fork_branch }}
-          GH_TOKEN: ${{ secrets.gh_pat }}
+          GH_TOKEN: ${{ secrets.gh_pat || github.token }}
         run: |
           BACKUP="$FORK_BRANCH-backup/$(date +%Y%m%d-%H%M%S)"
           git push origin "$FORK_BRANCH:refs/heads/$BACKUP"
@@ -183,7 +187,7 @@ jobs:
       - name: Create conflict issue
         if: steps.rebase.outputs.status == 'conflict'
         env:
-          GH_TOKEN: ${{ secrets.gh_pat }}
+          GH_TOKEN: ${{ secrets.gh_pat || github.token }}
           FORK_BRANCH: ${{ inputs.fork_branch }}
           UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
           UPSTREAM_REPO: ${{ inputs.upstream_repo }}
